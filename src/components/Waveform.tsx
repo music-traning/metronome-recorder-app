@@ -14,7 +14,6 @@ const Waveform: React.FC<WaveformProps> = ({ analyserNode }) => {
     const context = canvas.getContext('2d');
     if (!context) return;
     
-    // Resize canvas to fit container
     const resizeCanvas = () => {
       if(canvas.parentElement) {
         canvas.width = canvas.parentElement.clientWidth;
