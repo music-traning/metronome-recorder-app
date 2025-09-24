@@ -37,8 +37,8 @@ export default function App() {
 
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
-  const [recordedAudio, setRecordedAudio] = useState<{ url: string; type: string } | null>(null);
-  const [recordingError, setRecordingError] = useState<string | null>(null);
+  const [recordedAudioUrl, setRecordedAudioUrl] = useState<string | null>(null);
+  const [isMobile, setIsMobile] = useState(false);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -50,6 +50,17 @@ export default function App() {
   const currentBeatRef = useRef<number>(0);
   const visualTimeoutIdsRef = useRef<Set<number>>(new Set());
   const isCountingInRef = useRef(isCountingIn);
+
+  useEffect(() => {
+    const checkDevice = () => {
+      const mobile = window.innerWidth < 768;
+      setIsMobile(mobile);
+      document.title = mobile ? 'メトロノーム' : 'メトロノーム＆レコーダー';
+    };
+    checkDevice();
+    window.addEventListener('resize', checkDevice);
+    return () => window.removeEventListener('resize', checkDevice);
+  }, []);
 
   useEffect(() => {
     isCountingInRef.current = isCountingIn;
@@ -167,17 +178,26 @@ export default function App() {
   }, [isPlaying, tempo, clickPattern, playClick]);
 
   useEffect(() => {
+    const stopRecording = () => {
+      mediaRecorderRef.current?.stop();
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(track => track.stop());
+        streamRef.current = null;
+      }
+      setAnalyserNode(null);
+    };
+
+    if (isMobile) {
+      if (isRecording) {
+        stopRecording();
+        setIsRecording(false);
+      }
+      return;
+    }
+
     const startRecording = async () => {
       try {
-        const constraints = {
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl: true,
-          },
-          video: false
-        };
-        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
         streamRef.current = stream;
         
         if (!audioContextRef.current) {
@@ -189,71 +209,26 @@ export default function App() {
         const analyser = audioContextRef.current.createAnalyser();
         source.connect(analyser);
         setAnalyserNode(analyser);
-        
-        const supportedMimeTypes = [
-            'audio/mp4', // Preferred for iOS/Safari
-            'audio/webm;codecs=opus', // High quality for Chrome/Firefox
-            'audio/webm', // Fallback
-        ];
-        const supportedType = supportedMimeTypes.find(type => MediaRecorder.isTypeSupported(type));
 
-        if (!supportedType) {
-            setRecordingError('お使いのブラウザは、サポートされている形式での録音に対応していません。');
-            console.error("No supported MIME type for MediaRecorder found.");
-            setIsRecording(false);
-            stream.getTracks().forEach(track => track.stop());
-            setAnalyserNode(null);
-            return;
-        }
-
-        const options = { mimeType: supportedType };
-        mediaRecorderRef.current = new MediaRecorder(stream, options);
+        mediaRecorderRef.current = new MediaRecorder(stream);
         recordedChunksRef.current = [];
-        
         mediaRecorderRef.current.ondataavailable = (event) => {
             if(event.data.size > 0) {
                 recordedChunksRef.current.push(event.data);
             }
         };
-        
         mediaRecorderRef.current.onstop = () => {
-            if (recordedChunksRef.current.length === 0) {
-                return;
-            }
-            const mimeType = mediaRecorderRef.current?.mimeType || supportedType;
-            const audioBlob = new Blob(recordedChunksRef.current, { type: mimeType });
+            const audioBlob = new Blob(recordedChunksRef.current, { type: 'audio/webm' });
             const url = URL.createObjectURL(audioBlob);
-            
-            setRecordedAudio({ url, type: audioBlob.type });
-            setRecordingError(null);
+            setRecordedAudioUrl(url);
             recordedChunksRef.current = [];
-        };
-
-        mediaRecorderRef.current.onerror = (event) => {
-          const errorMessage = (event as any).error?.message || '不明なエラー';
-          console.error('MediaRecorder error:', event);
-          setRecordingError(`録音中にエラーが発生しました: ${errorMessage}`);
-          setIsRecording(false);
-        };
-        
+        }
         mediaRecorderRef.current.start();
 
       } catch (err) {
         console.error("マイクへのアクセスエラー:", err);
-        setRecordingError("マイクへのアクセスが拒否されました。");
         setIsRecording(false);
       }
-    };
-
-    const stopRecording = () => {
-      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
-        mediaRecorderRef.current.stop();
-      }
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
-        streamRef.current = null;
-      }
-      setAnalyserNode(null);
     };
 
     if (isRecording) {
@@ -265,7 +240,7 @@ export default function App() {
     return () => {
         stopRecording();
     };
-  }, [isRecording]);
+  }, [isRecording, isMobile]);
 
   const handlePlayStop = () => setIsPlaying(current => !current);
   const handleTempoChange = (e: React.ChangeEvent<HTMLInputElement>) => setTempo(Number(e.target.value));
@@ -279,10 +254,10 @@ export default function App() {
   };
   
   const handleRecordToggle = () => {
-      setRecordingError(null);
-      if (!isRecording && recordedAudio) {
-        URL.revokeObjectURL(recordedAudio.url);
-        setRecordedAudio(null);
+      if (isMobile) return;
+      if (!isRecording && recordedAudioUrl) {
+        URL.revokeObjectURL(recordedAudioUrl);
+        setRecordedAudioUrl(null);
       }
       setIsRecording(!isRecording)
   };
@@ -295,42 +270,15 @@ export default function App() {
     }
   };
 
-  const handleSaveRecording = async () => {
-    if (!recordedAudio) return;
-    
-    const extension = recordedAudio.type.includes('mp4') ? 'mp4' : 'webm';
-    const mimeType = recordedAudio.type.includes('mp4') ? 'audio/mp4' : 'audio/webm';
+  const handleSaveRecording = () => {
+    if (!recordedAudioUrl) return;
+    const link = document.createElement('a');
+    link.href = recordedAudioUrl;
     const timestamp = new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
-    const filename = `metronome-recording_${timestamp}.${extension}`;
-
-    try {
-      const response = await fetch(recordedAudio.url);
-      const blob = await response.blob();
-      const file = new File([blob], filename, { type: mimeType });
-
-      if (navigator.share && navigator.canShare({ files: [file] })) {
-        await navigator.share({
-          files: [file],
-          title: '録音を保存',
-          text: filename,
-        });
-      } else {
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = filename;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(link.href);
-      }
-    } catch (err) {
-      if ((err as DOMException).name === 'AbortError') {
-        console.log('共有がキャンセルされました。');
-      } else {
-        console.error("録音の保存/共有に失敗しました:", err);
-        setRecordingError("録音の保存に失敗しました。");
-      }
-    }
+    link.download = `metronome-recording_${timestamp}.webm`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
   };
 
   const playButtonLabel = !isPlaying ? '再生' : (isCountingIn ? '開始中...' : '停止');
@@ -338,11 +286,13 @@ export default function App() {
   return (
     <div className="bg-slate-900 text-slate-200 min-h-screen flex items-center justify-center p-4 font-sans">
       <div className="w-full max-w-md bg-slate-800 rounded-2xl shadow-2xl p-6 space-y-6 border border-slate-700">
-        <h1 className="text-3xl font-bold text-center text-cyan-400">メトロノーム＆レコーダー</h1>
+        <h1 className="text-3xl font-bold text-center text-cyan-400">{isMobile ? 'メトロノーム' : 'メトロノーム＆レコーダー'}</h1>
         
-        <div className="bg-slate-900 rounded-lg p-2 h-[120px] flex items-center justify-center">
-            <Waveform analyserNode={analyserNode} />
-        </div>
+        {!isMobile && (
+          <div className="bg-slate-900 rounded-lg p-2 h-[120px] flex items-center justify-center">
+              <Waveform analyserNode={analyserNode} />
+          </div>
+        )}
 
         <div className="grid grid-cols-4 gap-4 p-4 bg-slate-700/50 rounded-lg">
           {Array.from({ length: 16 }).map((_, beat) => (
@@ -407,48 +357,28 @@ export default function App() {
             <button
               onClick={handlePlayStop}
               className="flex-1 bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition-colors"
-              aria-label={playButtonLabel}
             >
               {isPlaying ? <PauseIcon /> : <PlayIcon />}
               <span>{playButtonLabel}</span>
             </button>
-            <button
-              onClick={handleRecordToggle}
-              className={`flex-1 font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition-colors ${
-                  isRecording ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-slate-600 hover:bg-slate-500 text-slate-200'
-              }`}
-               aria-label={isRecording ? '録音停止' : '録音開始'}
-            >
-              {isRecording ? <StopIcon /> : <MicIcon />}
-              <span>{isRecording ? '録音停止' : '録音'}</span>
-            </button>
+            {!isMobile && (
+              <button
+                onClick={handleRecordToggle}
+                className={`flex-1 font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition-colors ${
+                    isRecording ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-slate-600 hover:bg-slate-500 text-slate-200'
+                }`}
+              >
+                {isRecording ? <StopIcon /> : <MicIcon />}
+                <span>{isRecording ? '録音停止' : '録音'}</span>
+              </button>
+            )}
         </div>
 
-        {isRecording && (
-          <div className="text-center text-sm text-slate-400 mt-3 p-3 bg-slate-700/50 rounded-lg">
-            <p>🎧 よりクリアな録音のために、ヘッドホンの使用をお勧めします。</p>
-          </div>
-        )}
-
-        {recordingError && (
-          <div className="bg-red-900/50 border border-red-700 text-red-300 px-4 py-3 rounded-lg my-4 text-sm" role="alert">
-            <p className="font-bold">エラー</p>
-            <p>{recordingError}</p>
-          </div>
-        )}
-
-        {recordedAudio && !recordingError && (
+        {!isMobile && recordedAudioUrl && (
           <div className="space-y-2 pt-2">
             <label className="font-medium text-slate-300">録音の再生</label>
             <div className="flex items-center gap-3">
-              <audio
-                controls
-                src={recordedAudio.url}
-                className="w-full flex-grow"
-                onError={() => {
-                  setRecordingError('録音の再生に失敗しました。ファイルは保存可能ですが、このブラウザでは再生できない可能性があります。');
-                }}
-              ></audio>
+              <audio controls src={recordedAudioUrl} className="w-full flex-grow"></audio>
               <button
                 onClick={handleSaveRecording}
                 className="shrink-0 bg-slate-600 hover:bg-slate-500 text-slate-200 font-bold p-3 rounded-lg flex items-center justify-center transition-colors"
