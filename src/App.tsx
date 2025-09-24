@@ -37,8 +37,8 @@ export default function App() {
 
   const [isRecording, setIsRecording] = useState<boolean>(false);
   const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
-  const [recordedAudioUrl, setRecordedAudioUrl] = useState<string | null>(null);
-  const [recordingMimeType, setRecordingMimeType] = useState<string | null>(null);
+  const [recordedAudio, setRecordedAudio] = useState<{ url: string; type: string } | null>(null);
+  const [recordingError, setRecordingError] = useState<string | null>(null);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -169,7 +169,15 @@ export default function App() {
   useEffect(() => {
     const startRecording = async () => {
       try {
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+        const constraints = {
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+          video: false
+        };
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
         streamRef.current = stream;
         
         if (!audioContextRef.current) {
@@ -181,41 +189,66 @@ export default function App() {
         const analyser = audioContextRef.current.createAnalyser();
         source.connect(analyser);
         setAnalyserNode(analyser);
+        
+        const supportedMimeTypes = [
+            'audio/mp4', // Preferred for iOS/Safari
+            'audio/webm;codecs=opus', // High quality for Chrome/Firefox
+            'audio/webm', // Fallback
+        ];
+        const supportedType = supportedMimeTypes.find(type => MediaRecorder.isTypeSupported(type));
 
-        const mimeTypes = ['audio/mp4', 'audio/webm;codecs=opus', 'audio/webm'];
-        const supportedMimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type));
-
-        if (!supportedMimeType) {
-            alert('お使いのブラウザでは、録音機能がサポートされていません。');
+        if (!supportedType) {
+            setRecordingError('お使いのブラウザは、サポートされている形式での録音に対応していません。');
             console.error("No supported MIME type for MediaRecorder found.");
             setIsRecording(false);
+            stream.getTracks().forEach(track => track.stop());
+            setAnalyserNode(null);
             return;
         }
-        setRecordingMimeType(supportedMimeType);
 
-        mediaRecorderRef.current = new MediaRecorder(stream, { mimeType: supportedMimeType });
+        const options = { mimeType: supportedType };
+        mediaRecorderRef.current = new MediaRecorder(stream, options);
         recordedChunksRef.current = [];
+        
         mediaRecorderRef.current.ondataavailable = (event) => {
             if(event.data.size > 0) {
                 recordedChunksRef.current.push(event.data);
             }
         };
+        
         mediaRecorderRef.current.onstop = () => {
-            const audioBlob = new Blob(recordedChunksRef.current, { type: supportedMimeType });
+            if (recordedChunksRef.current.length === 0) {
+                return;
+            }
+            const mimeType = mediaRecorderRef.current?.mimeType || supportedType;
+            const audioBlob = new Blob(recordedChunksRef.current, { type: mimeType });
             const url = URL.createObjectURL(audioBlob);
-            setRecordedAudioUrl(url);
+            
+            setRecordedAudio({ url, type: audioBlob.type });
+            setRecordingError(null);
             recordedChunksRef.current = [];
-        }
+        };
+
+        mediaRecorderRef.current.onerror = (event) => {
+          const errorMessage = (event as any).error?.message || '不明なエラー';
+          console.error('MediaRecorder error:', event);
+          setRecordingError(`録音中にエラーが発生しました: ${errorMessage}`);
+          setIsRecording(false);
+        };
+        
         mediaRecorderRef.current.start();
 
       } catch (err) {
         console.error("マイクへのアクセスエラー:", err);
+        setRecordingError("マイクへのアクセスが拒否されました。");
         setIsRecording(false);
       }
     };
 
     const stopRecording = () => {
-      mediaRecorderRef.current?.stop();
+      if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+        mediaRecorderRef.current.stop();
+      }
       if (streamRef.current) {
         streamRef.current.getTracks().forEach(track => track.stop());
         streamRef.current = null;
@@ -246,9 +279,10 @@ export default function App() {
   };
   
   const handleRecordToggle = () => {
-      if (!isRecording && recordedAudioUrl) {
-        URL.revokeObjectURL(recordedAudioUrl);
-        setRecordedAudioUrl(null);
+      setRecordingError(null);
+      if (!isRecording && recordedAudio) {
+        URL.revokeObjectURL(recordedAudio.url);
+        setRecordedAudio(null);
       }
       setIsRecording(!isRecording)
   };
@@ -262,16 +296,17 @@ export default function App() {
   };
 
   const handleSaveRecording = async () => {
-    if (!recordedAudioUrl || !recordingMimeType) return;
-
+    if (!recordedAudio) return;
+    
+    const extension = recordedAudio.type.includes('mp4') ? 'mp4' : 'webm';
+    const mimeType = recordedAudio.type.includes('mp4') ? 'audio/mp4' : 'audio/webm';
     const timestamp = new Date().toISOString().slice(0, 19).replace('T', '_').replace(/:/g, '-');
-    const extension = recordingMimeType.startsWith('audio/mp4') ? 'mp4' : 'webm';
     const filename = `metronome-recording_${timestamp}.${extension}`;
 
     try {
-      const response = await fetch(recordedAudioUrl);
+      const response = await fetch(recordedAudio.url);
       const blob = await response.blob();
-      const file = new File([blob], filename, { type: recordingMimeType });
+      const file = new File([blob], filename, { type: mimeType });
 
       if (navigator.share && navigator.canShare({ files: [file] })) {
         await navigator.share({
@@ -293,7 +328,7 @@ export default function App() {
         console.log('共有がキャンセルされました。');
       } else {
         console.error("録音の保存/共有に失敗しました:", err);
-        alert("録音の保存に失敗しました。");
+        setRecordingError("録音の保存に失敗しました。");
       }
     }
   };
@@ -372,6 +407,7 @@ export default function App() {
             <button
               onClick={handlePlayStop}
               className="flex-1 bg-cyan-600 hover:bg-cyan-500 text-white font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition-colors"
+              aria-label={playButtonLabel}
             >
               {isPlaying ? <PauseIcon /> : <PlayIcon />}
               <span>{playButtonLabel}</span>
@@ -381,17 +417,38 @@ export default function App() {
               className={`flex-1 font-bold py-3 px-4 rounded-lg flex items-center justify-center gap-2 transition-colors ${
                   isRecording ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-slate-600 hover:bg-slate-500 text-slate-200'
               }`}
+               aria-label={isRecording ? '録音停止' : '録音開始'}
             >
               {isRecording ? <StopIcon /> : <MicIcon />}
               <span>{isRecording ? '録音停止' : '録音'}</span>
             </button>
         </div>
 
-        {recordedAudioUrl && (
+        {isRecording && (
+          <div className="text-center text-sm text-slate-400 mt-3 p-3 bg-slate-700/50 rounded-lg">
+            <p>🎧 よりクリアな録音のために、ヘッドホンの使用をお勧めします。</p>
+          </div>
+        )}
+
+        {recordingError && (
+          <div className="bg-red-900/50 border border-red-700 text-red-300 px-4 py-3 rounded-lg my-4 text-sm" role="alert">
+            <p className="font-bold">エラー</p>
+            <p>{recordingError}</p>
+          </div>
+        )}
+
+        {recordedAudio && !recordingError && (
           <div className="space-y-2 pt-2">
             <label className="font-medium text-slate-300">録音の再生</label>
             <div className="flex items-center gap-3">
-              <audio controls src={recordedAudioUrl} className="w-full flex-grow"></audio>
+              <audio
+                controls
+                src={recordedAudio.url}
+                className="w-full flex-grow"
+                onError={() => {
+                  setRecordingError('録音の再生に失敗しました。ファイルは保存可能ですが、このブラウザでは再生できない可能性があります。');
+                }}
+              ></audio>
               <button
                 onClick={handleSaveRecording}
                 className="shrink-0 bg-slate-600 hover:bg-slate-500 text-slate-200 font-bold p-3 rounded-lg flex items-center justify-center transition-colors"
